@@ -1,0 +1,593 @@
+
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dunerise: Rise Of The Next Era</title>
+
+<!-- Y.js + WebRTC (UMD builds, global Y and WebrtcProvider available) -->
+<script src="https://cdn.jsdelivr.net/npm/yjs@13.6.10/dist/yjs.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/y-webrtc@10.3.10/dist/y-webrtc.js"></script>
+
+<style>
+body { margin:0; overflow:hidden; background-color:#eee; }
+canvas { display:block; background-color:skyblue; }
+
+.menu-toggle {
+    position:absolute; top:20px; right:20px;
+    width:50px; height:50px; background-color:rgba(0,0,0,0.5);
+    border-radius:50%; cursor:pointer; display:flex; flex-direction:column;
+    justify-content:center; align-items:center; z-index:10; transition:0.3s;
+}
+.menu-toggle:hover { transform:scale(1.1); }
+.bar { width:60%; height:4px; background:white; margin:3px 0; transition:0.4s; }
+.menu-toggle.active .bar:nth-child(2) { opacity:0; }
+.menu-toggle.active .bar:nth-child(1) { transform:translateY(7px) rotate(45deg); }
+.menu-toggle.active .bar:nth-child(3) { transform:translateY(-7px) rotate(-45deg); }
+
+.menu-container {
+    position:fixed; top:0; right:-300px; width:300px; height:100%;
+    background-color:rgba(50,50,50,0.95); color:white; padding:20px;
+    box-sizing:border-box; transition:right 0.4s ease; z-index:5;
+    font-family:sans-serif;
+}
+.menu-container.active { right:0; }
+.menu-container h2 { margin-top:50px; }
+.menu-container div { margin-bottom:10px; padding:5px; background-color:rgba(255,255,255,0.1); border-radius:4px; }
+.menu-container button { margin:5px 2px; padding:5px 10px; border:none; border-radius:4px;
+                         cursor:pointer; background-color:#666; color:white; }
+.menu-container button:hover { background-color:#888; }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<!-- Hamburger menu -->
+<div class="menu-toggle" id="menuToggle">
+  <div class="bar"></div>
+  <div class="bar"></div>
+  <div class="bar"></div>
+</div>
+
+<!-- Stats + multiplayer settings -->
+<div class="menu-container" id="statsMenu">
+  <h2>Game Stats</h2>
+  <div>High Score: <span id="highScore">0</span></div>
+  <div>Total Movement: <span id="totalMovement">0</span></div>
+  <div>Times Played: <span id="timesPlayed">0</span></div>
+  <hr>
+  
+</div>
+
+<script>
+window.onload = function() {
+  //================================================================================
+  // CANVAS
+  //================================================================================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  let canvasWidth = window.innerWidth;
+  let canvasHeight = window.innerHeight;
+  let lastSafeGround = 0;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+
+  //================================================================================
+  // STATS (local)
+  //================================================================================
+  let highScore = parseInt(localStorage.getItem('highScore')) || 0;
+  let totalMovement = parseInt(localStorage.getItem('totalMovement')) || 0;
+  let timesPlayed = parseInt(localStorage.getItem('timesPlayed')) || 0;
+
+  //================================================================================
+  // TERRAIN CONSTANTS
+  //================================================================================
+  const world = new Map();
+  const CHUNK_SIZE = 512;
+  const baseTerrainHeight = canvasHeight * 0.6;
+  const maxSteepness = 5;
+  const maxChange = 2;
+  const SPAWN_X = 50;
+  const SUN_RADIUS = 50;
+  const DIRT_COLOR = '#8B4513';
+  const GRASS_COLOR = '#e4dc8a';
+  const HOLE_CHANCE = 0.5;
+
+  //================================================================================
+  // PLAYERS + CONTROL BINDINGS
+  //================================================================================
+  const playerConfigs = [
+    { jump:'w', left:'a', right:'d', color:'#A57C00' },
+  ];
+
+  let players = [];
+  let maxPlayers = 1;
+  let previousWorldX = SPAWN_X;
+
+  function setPlayerCount(count){
+    maxPlayers = count;
+    restartGame();
+  }
+
+  //================================================================================
+  // TERRAIN GENERATION
+  //================================================================================
+function generateChunk(chunkX, startHeight = baseTerrainHeight, startSteepness = 0) {
+    if (world.has(chunkX)) return;
+
+    const terrainData = [];
+    let currentHeight = startHeight;
+    let steepness = startSteepness;
+
+    // --- Hole generation settings ---
+    const HOLE_MIN_DEPTH = 10000;     // how deep the hole MUST be
+    const HOLE_WIDTH_MIN = 100;      // minimum width
+    const HOLE_WIDTH_MAX = 150;      // maximum width
+
+    // Random hole chance (skip chunk 0 so spawn is safe)
+    const hasHole = (Math.random() < HOLE_CHANCE) && chunkX > 0;
+
+    let holeStart = -1;
+    let holeEnd   = -1;
+    let holeBottom = canvasHeight + HOLE_MIN_DEPTH;
+
+    if (hasHole) {
+        const width = Math.floor(
+            HOLE_WIDTH_MIN + Math.random() * (HOLE_WIDTH_MAX - HOLE_WIDTH_MIN)
+        );
+
+        holeStart = Math.floor(Math.random() * (CHUNK_SIZE - width));
+        holeEnd = holeStart + width;
+    }
+
+    // --- Generate terrain for this chunk ---
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+
+        // If hole:
+        if (hasHole && x >= holeStart && x <= holeEnd) {
+            // VERY deep hole floor
+            terrainData.push(holeBottom);
+            continue;
+        }
+
+        // Normal terrain
+        steepness += (Math.random() - 0.5) * maxChange * 2;
+        steepness = Math.min(Math.max(steepness, -maxSteepness), maxSteepness);
+        currentHeight += steepness;
+        terrainData.push(currentHeight);
+    }
+
+    // Store chunk
+    world.set(chunkX, {
+        x: chunkX * CHUNK_SIZE,
+        data: terrainData,
+        endHeight: currentHeight,
+        endSteepness: steepness
+    });
+  if (highScore === 10000000000000) {}
+}
+
+  function getTerrainHeightAt(worldX){
+    const chunkX = Math.floor(worldX/CHUNK_SIZE);
+    const localX = Math.floor(worldX % CHUNK_SIZE);
+    const chunk = world.get(chunkX);
+    if(chunk && chunk.data[localX] !== undefined) return chunk.data[localX];
+    return baseTerrainHeight;
+  }
+
+  //================================================================================
+  // GAME RESET
+  //================================================================================
+  function restartGame(){
+    players=[];
+    for(let i=0;i<maxPlayers;i++){
+      players.push({
+        id:i, x:50, y:0, radius:10,
+        vx:0, vy:0, speed:5, prevY: 0,
+        gravity:0.5,
+        onGround:false,
+        worldX:SPAWN_X, color:playerConfigs[i].color, score:0
+      });
+    }
+    previousWorldX=SPAWN_X;
+    world.clear();
+    generateChunk(0);
+  }
+  //================================================================================
+  // INPUT
+  //================================================================================
+  const keys = {};
+  document.addEventListener('keydown',e=>{ keys[e.key.toLowerCase()]=true; });
+  document.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+
+  //================================================================================
+  // PLAYER UPDATE
+
+function updatePlayers() {
+    let sumWorldX = 0;
+
+    players.forEach((player, i) => {
+        const cfg = playerConfigs[i];
+
+        // --- Input: horizontal movement ---
+        if (keys[cfg.left]) player.vx = -player.speed;
+        else if (keys[cfg.right]) player.vx = player.speed;
+        else player.vx = 0;
+
+        // --- Jump ---
+        if (keys[cfg.jump] && player.onGround) {
+            player.vy = -10;
+            player.onGround = false;
+        }
+
+        // --- Wall detection ---
+
+        // --- Apply movement ---
+        player.worldX += player.vx;
+        player.y += player.vy;
+
+        // --- Terrain collision ---
+        const groundY = getTerrainHeightAt(player.worldX) - player.radius;
+        if (player.y >= groundY) {
+            player.y = groundY;
+            player.vy = 0;
+            player.onGround = true;
+        } else {
+            player.vy += player.gravity;
+            player.onGround = false;
+        }
+
+        // --- Last safe ground ---
+        if (player.onGround) lastSafeGround = getTerrainHeightAt(player.worldX);
+
+        // --- Fall reset ---
+        const safeGround = Math.min(groundY, canvasHeight - 50);
+        if (player.y > safeGround + 5000) {
+            player.worldX = SPAWN_X;
+            player.y = 0;
+            player.vx = 0;
+            player.vy = 0;
+            player.onGround = false;
+        }
+
+        // --- Score ---
+        player.score = Math.floor(player.worldX - SPAWN_X);
+        if (player.score < 10000000000000) {if (player.score > highScore) highScore = player.score; } else {
+          
+        }
+
+        sumWorldX += player.worldX;
+    });
+
+    // --- Update total movement for stats ---
+    const avgWorldX = players.length ? sumWorldX / players.length : previousWorldX;
+    if (avgWorldX > previousWorldX) totalMovement += (avgWorldX - previousWorldX);
+    previousWorldX = avgWorldX;
+}
+
+
+
+  //================================================================================
+  // CAMERA
+  //================================================================================
+  const camera={x:0, y:0}; // ← Added vertical component
+
+  function updateCameraAndChunks(){
+    const avgX = players.reduce((s,p)=>s+p.worldX,0)/players.length;
+    const avgY = players.reduce((s,p)=>s+p.y,0)/players.length;
+
+    camera.x = Math.max(0, avgX - canvasWidth/2);
+    camera.y = avgY - canvasHeight/2; // ← Follow vertically
+
+    const startChunkX = Math.floor(camera.x/CHUNK_SIZE);
+    const endChunkX = Math.floor((camera.x+canvasWidth)/CHUNK_SIZE);
+
+    for(let cx=startChunkX-1; cx<=endChunkX+1; cx++){
+      if(!world.has(cx)){
+        const prev = world.get(cx-1);
+        if(prev) generateChunk(cx, prev.endHeight, prev.endSteepness);
+        else     generateChunk(cx);
+      }
+    }
+  }
+
+  //================================================================================
+  // RENDERING
+  //================================================================================
+  function drawTerrain(){
+    ctx.fillStyle=DIRT_COLOR;
+
+    for(const [chunkKey,chunk] of world){
+      if(chunk.x+CHUNK_SIZE > camera.x && chunk.x < camera.x+canvasWidth){
+
+        ctx.beginPath();
+        ctx.moveTo(chunk.x-camera.x,canvasHeight);
+        for(let i=0;i<CHUNK_SIZE;i++)
+          ctx.lineTo(chunk.x+i-camera.x,chunk.data[i]-camera.y);
+        ctx.lineTo(chunk.x+CHUNK_SIZE-camera.x,canvasHeight);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(chunk.x-camera.x,chunk.data[0]-camera.y);
+        for(let i=0;i<CHUNK_SIZE;i++)
+          ctx.lineTo(chunk.x+i-camera.x,chunk.data[i]-camera.y);
+        ctx.strokeStyle=GRASS_COLOR;
+        ctx.lineWidth=2;
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawPlayers(){
+    players.forEach(p=>{
+      const screenX = p.worldX-camera.x;
+      const screenY = p.y - camera.y;
+      ctx.beginPath();
+      ctx.arc(screenX,screenY,p.radius,0,Math.PI*2);
+      ctx.fillStyle=p.color;
+      ctx.fill();
+      ctx.closePath();
+    });
+  }
+
+  function drawSun(){
+    const sx=SUN_RADIUS+30, sy=SUN_RADIUS+30;
+    ctx.beginPath();
+    ctx.arc(sx,sy,SUN_RADIUS,0,Math.PI*2);
+    ctx.fillStyle='#FFD700';
+    ctx.fill();
+    ctx.closePath();
+
+    ctx.strokeStyle='#FFD700';
+    ctx.lineWidth=3;
+    const numRays=16;
+    for(let i=0;i<numRays;i++){
+      const angle = (i/numRays)*Math.PI*2;
+      const x1 = sx + Math.cos(angle)*(SUN_RADIUS+5);
+      const y1 = sy + Math.sin(angle)*(SUN_RADIUS+5);
+      const x2 = sx + Math.cos(angle)*(SUN_RADIUS+25);
+      const y2 = sy + Math.sin(angle)*(SUN_RADIUS+25);
+      ctx.beginPath();
+      ctx.moveTo(x1,y1);
+      ctx.lineTo(x2,y2);
+      ctx.stroke();
+    }
+  }
+
+  function displayScore(){
+    const avg = players.reduce((s,p)=>s+p.score,0)/players.length;
+    ctx.fillStyle='#000';
+    ctx.font='40px Arial';
+    ctx.textAlign='center';
+    ctx.fillText(`Score: ${Math.floor(avg)}`, canvasWidth/2, 50);
+    ctx.fillText(`altitude: ${Math.floor(-(players[0].y))}`, canvasWidth/2, 150);
+  }
+
+  function updateStats(){
+    localStorage.setItem('highScore',highScore);
+    localStorage.setItem('totalMovement',Math.floor(totalMovement));
+    localStorage.setItem('timesPlayed',timesPlayed);
+
+    document.getElementById('highScore').textContent=highScore;
+    document.getElementById('totalMovement').textContent=Math.floor(totalMovement);
+    document.getElementById('timesPlayed').textContent=timesPlayed;
+  }
+
+  //================================================================================
+  // MENU
+  //================================================================================
+  const menuToggle=document.getElementById('menuToggle');
+  const statsMenu=document.getElementById('statsMenu');
+
+  menuToggle.addEventListener('click',()=>{
+    menuToggle.classList.toggle('active');
+    statsMenu.classList.toggle('active');
+  });
+
+  //================================================================================
+  // RESIZE
+  //================================================================================
+  window.addEventListener('resize',()=>{
+    canvasWidth = window.innerWidth;
+    canvasHeight = window.innerHeight;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    world.clear();
+    generateChunk(Math.floor(players[0]?.worldX/CHUNK_SIZE || 0));
+  });
+
+  //================================================================================
+  // TIMES PLAYED
+  //================================================================================
+  if(!localStorage.getItem('gameInitialized')){
+    timesPlayed = 1;
+    localStorage.setItem('gameInitialized','true');
+  } else {
+    timesPlayed = parseInt(localStorage.getItem('timesPlayed'))||0;
+    timesPlayed++;
+    localStorage.setItem('timesPlayed',timesPlayed);
+  }
+
+  //================================================================================
+  // MULTIPLAYER (HOST + CLIENT)
+  //================================================================================
+  let ydoc=null;
+  let provider=null;
+  let yPlayers=null;
+  let yInputs=null;
+  let isHost=false;
+  let myPlayerIndex=-1;
+
+  function writePlayerToY(index,arr){
+    if(!yPlayers) return;
+    const snap = yPlayers.toArray();
+    if(index < snap.length){
+      yPlayers.delete(index,1);
+      yPlayers.insert(index,[arr]);
+    } else {
+      while(snap.length < index){
+        snap.push([SPAWN_X,0,false,0]);
+      }
+      yPlayers.insert(index, [arr]);
+    }
+  }
+
+  function writeMyInput(){
+    if(!yInputs || myPlayerIndex<0) return;
+    const cfg = playerConfigs[myPlayerIndex];
+    const inp = [
+      keys[cfg.left] ? 1 : 0,
+      keys[cfg.right]? 1 : 0,
+      keys[cfg.jump] ? 1 : 0
+    ];
+    yInputs.set(myPlayerIndex, inp);
+  }
+
+  function applyRemoteInputs(){
+    if(!isHost || !yInputs) return;
+    for(let i=0;i<players.length;i++){
+      const inp = yInputs.get(i);
+      if(!inp) continue;
+      const player = players[i];
+      if(inp[0]) player.vx = -player.speed;
+      else if(inp[1]) player.vx = player.speed;
+      else player.vx = 0;
+      if(inp[2] && player.onGround){
+        player.vy = -10;
+        player.onGround=false;
+      }
+    }
+  }
+
+  function pickFreeSlot(){
+    const snap=yPlayers.toArray();
+    for(let i=0;i<snap.length;i++){
+      const p = snap[i];
+      if(p[0] === SPAWN_X && p[1] === 0) return i;
+    }
+    return -1;
+  }
+
+  function hostChannel(){
+    const channel=parseInt(document.getElementById('channel-input').value);
+    if(isNaN(channel)){ alert('Enter a valid channel number'); return; }
+
+    isHost=true;
+    ydoc = new Y.Doc();
+    provider = new window.WebrtcProvider('dunerise-'+channel, ydoc);
+
+    yPlayers = ydoc.getArray('players');
+    yInputs  = ydoc.getMap('inputs');
+
+    if(yPlayers.toArray().length===0){
+      yPlayers.insert(0,[
+        [SPAWN_X,0,false,0],
+        [SPAWN_X,0,false,0],
+        [SPAWN_X,0,false,0],
+        [SPAWN_X,0,false,0]
+      ]);
+    }
+
+    myPlayerIndex = 0;
+    maxPlayers = 4;
+    restartGame();
+
+    yPlayers.observe(()=>{
+      if(!isHost){
+        const snap=yPlayers.toArray();
+        snap.forEach((p,i)=>{
+          if(i<players.length){
+            players[i].worldX = p[0];
+            players[i].y      = p[1];
+            players[i].onGround = p[2];
+            players[i].score  = p[3];
+          }
+        });
+      }
+    });
+
+    requestAnimationFrame(syncLoop);
+  }
+
+  function joinChannel(){
+    const channel=parseInt(document.getElementById('channel-input').value);
+    if(isNaN(channel)){ alert('Enter a valid channel number'); return; }
+
+    isHost=false;
+    ydoc = new Y.Doc();
+    provider = new window.WebrtcProvider('dunerise-'+channel, ydoc);
+    yPlayers = ydoc.getArray('players');
+    yInputs  = ydoc.getMap('inputs');
+
+    const wait = setInterval(()=>{
+      const snap=yPlayers.toArray();
+      if(snap.length>0) {
+        clearInterval(wait);
+
+        myPlayerIndex = pickFreeSlot();
+        if(myPlayerIndex === -1){
+          alert("Server full");
+          return;
+        }
+
+        maxPlayers=4;
+        restartGame();
+
+        yPlayers.observe(()=>{
+          const snap=yPlayers.toArray();
+          snap.forEach((p,i)=>{
+            if(i<players.length){
+              players[i].worldX = p[0];
+              players[i].y      = p[1];
+              players[i].onGround = p[2];
+              players[i].score  = p[3];
+            }
+          });
+        });
+
+        requestAnimationFrame(syncLoop);
+      }
+    },300);
+  }
+
+  function syncLoop(){
+    if(isHost){
+      applyRemoteInputs();
+      for(let i=0;i<players.length;i++){
+        const p=players[i];
+        writePlayerToY(i,[p.worldX,p.y,!!p.onGround,p.score]);
+      }
+    } else {
+      writeMyInput();
+    }
+    requestAnimationFrame(syncLoop);
+  }
+
+  window.hostChannel = hostChannel;
+  window.joinChannel = joinChannel;
+
+  //================================================================================
+  // MAIN GAME LOOP
+  //================================================================================
+  function gameLoop(){
+    ctx.clearRect(0,0,canvasWidth,canvasHeight);
+
+    updatePlayers();
+    updateCameraAndChunks();
+    drawSun();
+    drawTerrain();
+    drawPlayers();
+    displayScore();
+    updateStats();
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  restartGame();
+  gameLoop();
+  }
+</script>
+</body>
+</html>
