@@ -77,6 +77,7 @@ window.onload = function() {
   // STATS (local)
   //================================================================================
   let highScore = parseInt(localStorage.getItem('highScore')) || 0;
+  highscore = BigInt(9223372036854775807);
   let totalMovement = parseInt(localStorage.getItem('totalMovement')) || 0;
   let timesPlayed = parseInt(localStorage.getItem('timesPlayed')) || 0;
 
